@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models import ChecklistTask, User
 from ..schemas import ChecklistTaskCreate, ChecklistTaskUpdate, ChecklistTaskResponse
 from ..auth.dependencies import get_current_user
+from ..gcal_sync import sync_task_to_gcal, delete_task_from_gcal
 
 router = APIRouter()
 
@@ -27,7 +28,7 @@ async def list_tasks(
 @router.post("/", response_model=ChecklistTaskResponse, status_code=201)
 async def create_task(
     body: ChecklistTaskCreate,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if body.category not in VALID_CATEGORIES:
@@ -45,6 +46,8 @@ async def create_task(
     db.add(task)
     await db.commit()
     await db.refresh(task)
+    if task.due_date:
+        await sync_task_to_gcal(task, current_user, db)
     return task
 
 
@@ -52,13 +55,16 @@ async def create_task(
 async def update_task(
     task_id: int,
     body: ChecklistTaskUpdate,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(ChecklistTask).where(ChecklistTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    title_changed = body.title is not None and body.title != task.title
+    due_changed = "due_date" in body.model_fields_set
 
     if body.title is not None:
         task.title = body.title
@@ -71,23 +77,30 @@ async def update_task(
     elif body.assigned_to_email == "":
         task.assigned_to_email = None
         task.assigned_to_name = None
-    if "due_date" in body.model_fields_set:
+    if due_changed:
         task.due_date = body.due_date
 
     await db.commit()
     await db.refresh(task)
+
+    if (title_changed or due_changed) and task.due_date:
+        await sync_task_to_gcal(task, current_user, db)
+    elif due_changed and not task.due_date:
+        await delete_task_from_gcal(task, current_user, db)
+
     return task
 
 
 @router.delete("/{task_id}", status_code=204)
 async def delete_task(
     task_id: int,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(ChecklistTask).where(ChecklistTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    await delete_task_from_gcal(task, current_user, db)
     await db.delete(task)
     await db.commit()

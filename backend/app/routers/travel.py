@@ -8,6 +8,7 @@ from ..models import FlightItinerary, User
 from ..schemas import FlightItineraryCreate, FlightItineraryResponse
 from ..auth.dependencies import get_current_user
 from ..config import settings
+from ..gcal_sync import sync_flight_to_gcal, delete_flight_from_gcal
 
 router = APIRouter()
 
@@ -119,18 +120,20 @@ async def create_itinerary(
     db.add(itinerary)
     await db.commit()
     await db.refresh(itinerary)
+    await sync_flight_to_gcal(itinerary, current_user, db)
     return itinerary
 
 
 @router.delete("/itineraries/{itinerary_id}", status_code=204)
 async def delete_itinerary(
     itinerary_id: int,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(FlightItinerary).where(FlightItinerary.id == itinerary_id))
     itinerary = result.scalar_one_or_none()
     if not itinerary:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Itinerary not found")
+    await delete_flight_from_gcal(itinerary, current_user, db)
     await db.delete(itinerary)
     await db.commit()

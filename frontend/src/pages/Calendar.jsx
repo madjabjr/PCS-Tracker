@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../api/client'
+import ConflictBadge from '../components/ConflictBadge'
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = [
@@ -30,6 +31,10 @@ function isSameDay(a, b) {
   )
 }
 
+function toDateKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
 function fmtTime(iso) {
   if (!iso) return ''
   const d = new Date(iso)
@@ -37,11 +42,10 @@ function fmtTime(iso) {
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
 }
 
-function fmtDateTime(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d)) return iso
-  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
+function monthRangeISO(year, month) {
+  const start = new Date(Date.UTC(year, month, 1))
+  const end = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59))
+  return { timeMin: start.toISOString(), timeMax: end.toISOString() }
 }
 
 export default function Calendar() {
@@ -51,32 +55,63 @@ export default function Calendar() {
   const [month, setMonth] = useState(today.getMonth())
   const [selectedDay, setSelectedDay] = useState(null)
   const [tasks, setTasks] = useState([])
-  const [gcalEvents, setGcalEvents] = useState([])
+  const [pcsEvents, setPcsEvents] = useState([])
   const [gcalConnected, setGcalConnected] = useState(null)
   const [gcalError, setGcalError] = useState(null)
+  const [gcalNeedsReconnect, setGcalNeedsReconnect] = useState(false)
+  const [primaryConflicts, setPrimaryConflicts] = useState({})
   const [loading, setLoading] = useState(true)
   const [disconnecting, setDisconnecting] = useState(false)
 
-  const fetchData = useCallback(async () => {
+  // Build a dateKey → [conflict events] map from a flat list of primary calendar events
+  const buildConflictMap = (events) => {
+    const map = {}
+    for (const ev of events) {
+      if (!ev.start) continue
+      const key = ev.start.substring(0, 10)
+      if (!map[key]) map[key] = []
+      map[key].push(ev)
+    }
+    return map
+  }
+
+  const fetchAll = useCallback(async (yr, mo) => {
     setLoading(true)
+    const { timeMin, timeMax } = monthRangeISO(yr, mo)
     try {
       const [tasksRes, gcalRes] = await Promise.allSettled([
         api.get('/calendar/tasks'),
-        api.get('/calendar/google-events'),
+        api.get('/calendar/google-events', { params: { time_min: timeMin, time_max: timeMax } }),
       ])
       if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data)
       if (gcalRes.status === 'fulfilled') {
         const g = gcalRes.value.data
-        setGcalEvents(g.events || [])
+        setPcsEvents(g.events || [])
         setGcalConnected(g.connected)
         setGcalError(g.error || null)
+        setGcalNeedsReconnect(!!g.needs_reconnect)
       }
     } finally {
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  const fetchConflicts = useCallback(async (yr, mo) => {
+    const { timeMin, timeMax } = monthRangeISO(yr, mo)
+    try {
+      const res = await api.get('/calendar/primary-conflicts', { params: { time_min: timeMin, time_max: timeMax } })
+      if (res.data.connected) {
+        setPrimaryConflicts(buildConflictMap(res.data.events || []))
+      }
+    } catch {
+      // conflicts are best-effort
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchAll(year, month)
+    fetchConflicts(year, month)
+  }, [fetchAll, fetchConflicts, year, month])
 
   useEffect(() => {
     if (searchParams.get('gcal_connected') || searchParams.get('gcal_error')) {
@@ -89,8 +124,9 @@ export default function Calendar() {
     try {
       await api.post('/calendar/disconnect')
       setGcalConnected(false)
-      setGcalEvents([])
+      setPcsEvents([])
       setGcalError(null)
+      setPrimaryConflicts({})
     } finally {
       setDisconnecting(false)
     }
@@ -123,15 +159,20 @@ export default function Calendar() {
       .filter(t => t.due_date && isSameDay(new Date(t.due_date), date))
       .map(t => ({ type: 'task', title: t.title, category: t.category, id: t.id, is_completed: t.is_completed, time: t.due_date }))
 
-    const calItems = gcalEvents
+    const pcsItems = pcsEvents
       .filter(e => {
         if (!e.start) return false
         const start = new Date(e.start)
         return !isNaN(start) && isSameDay(start, date)
       })
-      .map(e => ({ type: 'gcal', title: e.title, id: e.id, html_link: e.html_link, all_day: e.all_day, time: e.start }))
+      .map(e => ({ type: 'pcs', title: e.title, id: e.id, html_link: e.html_link, all_day: e.all_day, time: e.start }))
 
-    return [...taskItems, ...calItems]
+    return [...taskItems, ...pcsItems]
+  }
+
+  const getConflictsForDay = (day) => {
+    const date = new Date(year, month, day)
+    return primaryConflicts[toDateKey(date)] || []
   }
 
   const cells = []
@@ -139,6 +180,7 @@ export default function Calendar() {
   for (let d = 1; d <= daysInMonth; d++) cells.push(d)
 
   const selectedEvents = selectedDay ? getEventsForDay(selectedDay) : []
+  const selectedConflicts = selectedDay ? getConflictsForDay(selectedDay) : []
 
   if (loading) {
     return (
@@ -155,7 +197,7 @@ export default function Calendar() {
     <div className="page">
       <div className="page-header">
         <h1 className="page-title">Calendar</h1>
-        <p className="page-subtitle">Task due dates and Google Calendar events in one view.</p>
+        <p className="page-subtitle">PCS task due dates and your dedicated PCS Tracker calendar events.</p>
       </div>
 
       {gcalConnected === false && (
@@ -171,7 +213,7 @@ export default function Calendar() {
           <div className="cal-connect-body">
             <h3 className="cal-connect-title">Connect Google Calendar</h3>
             <p className="cal-connect-desc">
-              View your Google Calendar events alongside task due dates. Requires a Google account and calendar read permission.
+              Creates a dedicated <strong>PCS Tracker</strong> calendar in your Google account and enables conflict detection against your primary calendar.
             </p>
             {gcalError && <p style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 4 }}>{gcalError}</p>}
           </div>
@@ -187,12 +229,24 @@ export default function Calendar() {
         </div>
       )}
 
-      {gcalConnected === true && (
+      {gcalConnected === true && gcalNeedsReconnect && (
+        <div className="cal-reconnect-bar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>Calendar permissions updated — please reconnect to enable the dedicated PCS calendar.</span>
+          <a href="/api/calendar/connect" className="cal-disconnect-btn">Reconnect</a>
+        </div>
+      )}
+
+      {gcalConnected === true && !gcalNeedsReconnect && (
         <div className="cal-connected-bar">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" style={{ color: 'var(--color-success)' }}>
             <polyline points="20 6 9 17 4 12" />
           </svg>
-          <span>Google Calendar connected</span>
+          <span>PCS Tracker calendar connected — syncing tasks &amp; detecting conflicts</span>
           <button className="cal-disconnect-btn" onClick={disconnect} disabled={disconnecting}>
             {disconnecting ? 'Disconnecting…' : 'Disconnect'}
           </button>
@@ -225,8 +279,10 @@ export default function Calendar() {
             {cells.map((day, i) => {
               if (!day) return <div key={`e-${i}`} className="cal-cell cal-cell--empty" />
               const events = getEventsForDay(day)
+              const conflicts = getConflictsForDay(day)
               const isToday = isSameDay(new Date(year, month, day), today)
               const isSelected = selectedDay === day
+              const hasConflict = events.length > 0 && conflicts.length > 0
               return (
                 <div
                   key={day}
@@ -252,6 +308,7 @@ export default function Calendar() {
                         />
                       ))}
                       {events.length > 3 && <span className="cal-dot-more">+{events.length - 3}</span>}
+                      {hasConflict && <span className="cal-conflict-dot" title={`${conflicts.length} primary calendar conflict${conflicts.length > 1 ? 's' : ''}`}>⚠</span>}
                     </div>
                   )}
                 </div>
@@ -268,38 +325,63 @@ export default function Calendar() {
               </h3>
             </div>
             {selectedDay ? (
-              selectedEvents.length === 0 ? (
-                <div className="empty-state">No events on this day.</div>
-              ) : (
-                <ul className="cal-event-list">
-                  {selectedEvents.map((ev, idx) => (
-                    <li key={idx} className={`cal-event cal-event--${ev.type}`}>
-                      <div
-                        className="cal-event-stripe"
-                        style={{ background: ev.type === 'task' ? (CATEGORY_COLORS[ev.category] || '#888') : '#4285F4' }}
-                      />
-                      <div className="cal-event-body">
-                        <div className="cal-event-label">
-                          {ev.type === 'task' ? ev.category : 'Google Calendar'}
+              <>
+                {selectedConflicts.length > 0 && (
+                  <div className="cal-conflict-banner">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="13" height="13">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                    <div>
+                      <div className="cal-conflict-banner-title">Primary calendar conflicts</div>
+                      {selectedConflicts.map((c, i) => (
+                        <div key={i} className="cal-conflict-banner-item">
+                          {c.title}{!c.all_day && c.start ? ` · ${fmtTime(c.start)}` : ''}
                         </div>
-                        <div className="cal-event-title">
-                          {ev.html_link ? (
-                            <a href={ev.html_link} target="_blank" rel="noopener noreferrer">{ev.title}</a>
-                          ) : (
-                            <span style={{ textDecoration: ev.is_completed ? 'line-through' : 'none', color: ev.is_completed ? 'var(--color-text-muted)' : 'inherit' }}>
-                              {ev.title}
-                            </span>
-                          )}
-                        </div>
-                        {ev.time && !ev.all_day && (
-                          <div className="cal-event-time">{fmtTime(ev.time)}</div>
-                        )}
-                        {ev.all_day && <div className="cal-event-time">All day</div>}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedEvents.length === 0 ? (
+                  <div className="empty-state">No PCS events on this day.</div>
+                ) : (
+                  <ul className="cal-event-list">
+                    {selectedEvents.map((ev, idx) => {
+                      const evDate = new Date(ev.time || `${year}-${month + 1}-${selectedDay}`)
+                      const evKey = toDateKey(evDate)
+                      const evConflicts = primaryConflicts[evKey] || []
+                      return (
+                        <li key={idx} className={`cal-event cal-event--${ev.type}`}>
+                          <div
+                            className="cal-event-stripe"
+                            style={{ background: ev.type === 'task' ? (CATEGORY_COLORS[ev.category] || '#888') : '#4285F4' }}
+                          />
+                          <div className="cal-event-body">
+                            <div className="cal-event-label">
+                              {ev.type === 'task' ? ev.category : 'PCS Calendar'}
+                            </div>
+                            <div className="cal-event-title">
+                              {ev.html_link ? (
+                                <a href={ev.html_link} target="_blank" rel="noopener noreferrer">{ev.title}</a>
+                              ) : (
+                                <span style={{ textDecoration: ev.is_completed ? 'line-through' : 'none', color: ev.is_completed ? 'var(--color-text-muted)' : 'inherit' }}>
+                                  {ev.title}
+                                </span>
+                              )}
+                              <ConflictBadge conflicts={evConflicts} />
+                            </div>
+                            {ev.time && !ev.all_day && (
+                              <div className="cal-event-time">{fmtTime(ev.time)}</div>
+                            )}
+                            {ev.all_day && <div className="cal-event-time">All day</div>}
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </>
             ) : (
               <div className="empty-state">Click a day to see events.</div>
             )}
@@ -318,7 +400,11 @@ export default function Calendar() {
               ))}
               <div className="cal-legend-item">
                 <span className="cal-dot" style={{ background: '#4285F4' }} />
-                <span>Google Calendar</span>
+                <span>PCS Calendar event</span>
+              </div>
+              <div className="cal-legend-item">
+                <span className="cal-conflict-dot" style={{ marginRight: 4 }}>⚠</span>
+                <span>Primary calendar conflict</span>
               </div>
             </div>
           </div>

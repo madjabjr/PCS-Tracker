@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
+import ConflictBadge from '../components/ConflictBadge'
 
 const KEY_TYPES = ['pack_out', 'arrival', 'report_date']
 
@@ -41,12 +42,6 @@ const META = {
     bg: 'rgba(90,99,120,.06)',
     border: 'var(--color-border)',
   },
-  calendar: {
-    label: 'Event',
-    color: '#4285F4',
-    bg: 'rgba(66,133,244,.08)',
-    border: 'rgba(66,133,244,.2)',
-  },
 }
 
 function detectType(title) {
@@ -76,7 +71,11 @@ function fmtDateTime(d, hasTime) {
   return fmtDateShort(d)
 }
 
-function buildMilestones(tasks, itineraries, gcalEvents) {
+function toDateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function buildMilestones(tasks, itineraries) {
   const milestones = []
   const now = new Date()
 
@@ -135,25 +134,6 @@ function buildMilestones(tasks, itineraries, gcalEvents) {
     }
   }
 
-  for (const ev of gcalEvents) {
-    if (!ev.start) continue
-    const d = new Date(ev.start)
-    if (isNaN(d)) continue
-    const type = detectType(ev.title)
-    milestones.push({
-      id: `gcal-${ev.id}`,
-      title: ev.title,
-      date: d,
-      hasTime: !ev.all_day,
-      type: type === 'checklist' ? 'calendar' : type,
-      source: 'Google Calendar',
-      sourcePath: '/calendar',
-      is_completed: d < now,
-      detail: null,
-      html_link: ev.html_link || null,
-    })
-  }
-
   milestones.sort((a, b) => a.date - b.date)
   return milestones
 }
@@ -182,14 +162,6 @@ function MilestoneIcon({ type }) {
   if (type === 'flight_depart' || type === 'flight_arrive') return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-    </svg>
-  )
-  if (type === 'calendar') return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <rect x="3" y="4" width="18" height="18" rx="2" />
-      <line x1="16" y1="2" x2="16" y2="6" />
-      <line x1="8" y1="2" x2="8" y2="6" />
-      <line x1="3" y1="10" x2="21" y2="10" />
     </svg>
   )
   return (
@@ -252,20 +224,29 @@ function HeroCard({ type, milestone }) {
 export default function Timeline() {
   const [tasks, setTasks] = useState([])
   const [itineraries, setItineraries] = useState([])
-  const [gcalEvents, setGcalEvents] = useState([])
+  const [primaryConflicts, setPrimaryConflicts] = useState({})
   const [loading, setLoading] = useState(true)
+
+  const buildConflictMap = (events) => {
+    const map = {}
+    for (const ev of events) {
+      if (!ev.start) continue
+      const key = ev.start.substring(0, 10)
+      if (!map[key]) map[key] = []
+      map[key].push(ev)
+    }
+    return map
+  }
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
     try {
-      const [tasksRes, itinRes, gcalRes] = await Promise.allSettled([
+      const [tasksRes, itinRes] = await Promise.allSettled([
         api.get('/checklist/'),
         api.get('/travel/itineraries'),
-        api.get('/calendar/google-events'),
       ])
       if (tasksRes.status === 'fulfilled') setTasks(tasksRes.value.data)
       if (itinRes.status === 'fulfilled') setItineraries(itinRes.value.data)
-      if (gcalRes.status === 'fulfilled') setGcalEvents(gcalRes.value.data.events || [])
     } finally {
       setLoading(false)
     }
@@ -273,7 +254,27 @@ export default function Timeline() {
 
   useEffect(() => { fetchAll() }, [fetchAll])
 
-  const milestones = buildMilestones(tasks, itineraries, gcalEvents)
+  // Fetch primary conflicts once we have milestones to determine the date range
+  useEffect(() => {
+    if (loading) return
+    const milestones = buildMilestones(tasks, itineraries)
+    if (milestones.length === 0) return
+
+    const earliest = milestones[0].date
+    const latest = milestones[milestones.length - 1].date
+    const timeMin = new Date(Date.UTC(earliest.getFullYear(), earliest.getMonth(), earliest.getDate())).toISOString()
+    const timeMax = new Date(Date.UTC(latest.getFullYear(), latest.getMonth(), latest.getDate(), 23, 59, 59)).toISOString()
+
+    api.get('/calendar/primary-conflicts', { params: { time_min: timeMin, time_max: timeMax } })
+      .then(res => {
+        if (res.data.connected) {
+          setPrimaryConflicts(buildConflictMap(res.data.events || []))
+        }
+      })
+      .catch(() => {})
+  }, [loading, tasks, itineraries])
+
+  const milestones = buildMilestones(tasks, itineraries)
 
   const keyMilestones = {}
   for (const type of KEY_TYPES) {
@@ -314,7 +315,7 @@ export default function Timeline() {
     <div className="page">
       <div className="page-header">
         <h1 className="page-title">Timeline</h1>
-        <p className="page-subtitle">Key dates unified from your Checklist, Travel itineraries, and Google Calendar.</p>
+        <p className="page-subtitle">Key dates unified from your Checklist and Travel itineraries.</p>
       </div>
 
       <div className="tl-hero">
@@ -336,9 +337,9 @@ export default function Timeline() {
             <p>
               Add tasks with due dates in{' '}
               <Link to="/tasks" style={{ color: 'var(--color-primary)' }}>Checklist</Link>,
-              save flights in{' '}
-              <Link to="/travel" style={{ color: 'var(--color-primary)' }}>Travel</Link>,
-              or connect Google Calendar to populate your timeline.
+              or save flights in{' '}
+              <Link to="/travel" style={{ color: 'var(--color-primary)' }}>Travel</Link>{' '}
+              to populate your timeline.
             </p>
           </div>
         </div>
@@ -367,6 +368,7 @@ export default function Timeline() {
               const isToday = days === 0
               const meta = META[m.type] || META.checklist
               const isKey = KEY_TYPES.includes(m.type)
+              const conflicts = primaryConflicts[toDateKey(m.date)] || []
 
               return (
                 <div
@@ -415,11 +417,13 @@ export default function Timeline() {
                       style={{
                         color: isPast ? 'var(--color-text-muted)' : 'var(--color-text)',
                         textDecoration: m.is_completed ? 'line-through' : 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
                       }}
                     >
-                      {m.html_link ? (
-                        <a href={m.html_link} target="_blank" rel="noopener noreferrer">{m.title}</a>
-                      ) : m.title}
+                      <span>{m.title}</span>
+                      {conflicts.length > 0 && <ConflictBadge conflicts={conflicts} />}
                     </div>
 
                     <div className="tl-meta-row">
@@ -448,7 +452,6 @@ export default function Timeline() {
               {[
                 tasks.some(t => t.due_date) && 'Checklist',
                 itineraries.length > 0 && 'Travel',
-                gcalEvents.length > 0 && 'Google Calendar',
               ].filter(Boolean).join(', ')}
             </span>
           </div>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import api from '../api/client'
+import ConflictBadge from '../components/ConflictBadge'
 
 const CATEGORIES = [
   { key: 'all', label: 'All' },
@@ -19,6 +20,7 @@ export default function TaskManager() {
   const [users, setUsers] = useState([])
   const [activeCategory, setActiveCategory] = useState('all')
   const [loading, setLoading] = useState(true)
+  const [primaryConflicts, setPrimaryConflicts] = useState({})
   const [newTitle, setNewTitle] = useState('')
   const [newCategory, setNewCategory] = useState('medical')
   const [newDueDate, setNewDueDate] = useState('')
@@ -35,10 +37,39 @@ export default function TaskManager() {
     }
   }, [])
 
+  const fetchConflicts = useCallback((loadedTasks) => {
+    const datedTasks = loadedTasks.filter(t => t.due_date)
+    if (datedTasks.length === 0) return
+    const dates = datedTasks.map(t => new Date(t.due_date)).filter(d => !isNaN(d))
+    if (dates.length === 0) return
+    const earliest = new Date(Math.min(...dates))
+    const latest = new Date(Math.max(...dates))
+    const timeMin = new Date(Date.UTC(earliest.getFullYear(), earliest.getMonth(), earliest.getDate())).toISOString()
+    const timeMax = new Date(Date.UTC(latest.getFullYear(), latest.getMonth(), latest.getDate(), 23, 59, 59)).toISOString()
+    api.get('/calendar/primary-conflicts', { params: { time_min: timeMin, time_max: timeMax } })
+      .then(res => {
+        if (!res.data.connected) return
+        const map = {}
+        for (const ev of res.data.events || []) {
+          if (!ev.start) continue
+          const key = ev.start.substring(0, 10)
+          if (!map[key]) map[key] = []
+          map[key].push(ev)
+        }
+        setPrimaryConflicts(map)
+      })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     fetchTasks()
     api.get('/users').then(r => setUsers(r.data)).catch(() => {})
   }, [fetchTasks])
+
+  // Fetch conflicts after tasks load
+  useEffect(() => {
+    if (!loading && tasks.length > 0) fetchConflicts(tasks)
+  }, [loading, tasks, fetchConflicts])
 
   const toggle = async (task) => {
     const updated = { is_completed: !task.is_completed }
@@ -220,17 +251,27 @@ export default function TaskManager() {
                       </button>
                       <span className="cl-task-title">
                         {task.title}
-                        {task.due_date && (
-                          <span className="cl-due-badge">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="10" height="10">
-                              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                              <line x1="16" y1="2" x2="16" y2="6" />
-                              <line x1="8" y1="2" x2="8" y2="6" />
-                              <line x1="3" y1="10" x2="21" y2="10" />
-                            </svg>
-                            {new Date(task.due_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                          </span>
-                        )}
+                        {task.due_date && (() => {
+                          const d = new Date(task.due_date)
+                          const key = !isNaN(d)
+                            ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+                            : null
+                          const conflicts = key ? (primaryConflicts[key] || []) : []
+                          return (
+                            <>
+                              <span className="cl-due-badge">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="10" height="10">
+                                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                                  <line x1="16" y1="2" x2="16" y2="6" />
+                                  <line x1="8" y1="2" x2="8" y2="6" />
+                                  <line x1="3" y1="10" x2="21" y2="10" />
+                                </svg>
+                                {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              </span>
+                              <ConflictBadge conflicts={conflicts} />
+                            </>
+                          )
+                        })()}
                       </span>
                       <select
                         className="cl-assignee-select"
