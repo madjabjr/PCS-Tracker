@@ -65,6 +65,7 @@ function UserManagement() {
 
   return (
     <div>
+      <div className="wl-table-wrap">
       <table className="wl-table">
         <thead>
           <tr>
@@ -110,6 +111,7 @@ function UserManagement() {
           ))}
         </tbody>
       </table>
+      </div>
 
       <form className="wl-add-form" onSubmit={handleAdd}>
         <div className="wl-add-title">Add Google Account</div>

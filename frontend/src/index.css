@@ -736,8 +736,15 @@ body {
 }
 
 /* ── Whitelist table ─────────────────────────────────── */
+.wl-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .wl-table {
   width: 100%;
+  min-width: 440px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -3439,4 +3446,78 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #bbbec7;
+}
+
+/* ════════════════════════════════════════════════════════
+   Mobile safety — consolidated responsive overrides
+   Keep these last so they win over earlier page-specific rules.
+   ════════════════════════════════════════════════════════ */
+
+/* Media never forces horizontal page scroll */
+img, video, canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 768px) {
+  /* Tighter content padding; leave room for the hamburger toggle */
+  .page-content {
+    padding: 16px 16px 40px;
+  }
+  .topbar {
+    padding: 0 16px 0 56px;
+  }
+
+  /* Modals use more of the viewport, less dead margin */
+  .hvi-overlay {
+    padding: 12px;
+  }
+  .hvi-modal {
+    max-height: 94vh;
+  }
+
+  /* Two-column modal/form grids stack (items, housing, documents) */
+  .hvi-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Long emails / values wrap instead of overflowing the table */
+  .wl-email {
+    word-break: break-all;
+  }
+
+  /* Calendar: smaller cells so a 7-column grid fits a phone */
+  .cal-cell {
+    min-height: 56px;
+    padding: 4px;
+  }
+  .cal-day-name {
+    padding: 6px 2px;
+    font-size: 10px;
+  }
+  .cal-day-num {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .page-content {
+    padding: 12px 12px 32px;
+  }
+  .page-title {
+    font-size: 19px;
+  }
+
+  /* Modal action buttons stack full-width for easy tapping */
+  .hvi-modal-actions {
+    flex-direction: column-reverse;
+  }
+  .hvi-modal-actions .btn {
+    width: 100%;
+  }
+
+  /* Minimal calendar cells on the smallest screens */
+  .cal-cell {
+    min-height: 46px;
+  }
 }
