@@ -13,8 +13,12 @@ env/
 dist/
 build/
 .eggs/
+.pytest_cache/
+*.log
 
 # SQLite database
+*.sqlite
+*.sqlite3
 *.db
 *.db-shm
 *.db-wal
@@ -29,3 +33,5 @@ Thumbs.db
 
 # Node
 node_modules/
+.next/
+.vite/
