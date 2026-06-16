@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import api from '../api/client'
 import ConflictBadge from '../components/ConflictBadge'
 
@@ -26,6 +26,10 @@ export default function TaskManager() {
   const [newDueDate, setNewDueDate] = useState('')
   const [addingTask, setAddingTask] = useState(false)
   const [savingNew, setSavingNew] = useState(false)
+  const [editingId, setEditingId] = useState(null)
+  const [editText, setEditText] = useState('')
+  const [editDate, setEditDate] = useState('')
+  const editInputRef = useRef(null)
 
   const fetchTasks = useCallback(async () => {
     try {
@@ -102,6 +106,48 @@ export default function TaskManager() {
       await api.delete(`/checklist/${id}`)
     } catch {
       fetchTasks()
+    }
+  }
+
+  const toDateInputValue = (isoStr) => {
+    if (!isoStr) return ''
+    const d = new Date(isoStr)
+    if (isNaN(d)) return ''
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }
+
+  const startEdit = (task) => {
+    setEditingId(task.id)
+    setEditText(task.title)
+    setEditDate(toDateInputValue(task.due_date))
+    setTimeout(() => editInputRef.current?.focus(), 0)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditText('')
+    setEditDate('')
+  }
+
+  const saveEdit = async (task) => {
+    const trimmed = editText.trim()
+    if (!trimmed) { cancelEdit(); return }
+    const newDueIso = editDate ? new Date(editDate).toISOString() : null
+    const oldDueDate = toDateInputValue(task.due_date)
+    const titleChanged = trimmed !== task.title
+    const dateChanged = editDate !== oldDueDate
+    if (!titleChanged && !dateChanged) { cancelEdit(); return }
+    const patch = {}
+    if (titleChanged) patch.title = trimmed
+    if (dateChanged) patch.due_date = newDueIso
+    const optimistic = { ...task, ...patch }
+    setTasks(prev => prev.map(t => t.id === task.id ? optimistic : t))
+    cancelEdit()
+    try {
+      const res = await api.patch(`/checklist/${task.id}`, patch)
+      setTasks(prev => prev.map(t => t.id === task.id ? res.data : t))
+    } catch {
+      setTasks(prev => prev.map(t => t.id === task.id ? task : t))
     }
   }
 
@@ -249,34 +295,60 @@ export default function TaskManager() {
                           </svg>
                         )}
                       </button>
-                      <span className="cl-task-title">
-                        {task.title}
-                        {task.due_date && (() => {
-                          const d = new Date(task.due_date)
-                          const key = !isNaN(d)
-                            ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-                            : null
-                          const conflicts = key ? (primaryConflicts[key] || []) : []
-                          return (
-                            <>
-                              <span className="cl-due-badge">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="10" height="10">
-                                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                                  <line x1="16" y1="2" x2="16" y2="6" />
-                                  <line x1="8" y1="2" x2="8" y2="6" />
-                                  <line x1="3" y1="10" x2="21" y2="10" />
-                                </svg>
-                                {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                              </span>
-                              <ConflictBadge conflicts={conflicts} />
-                            </>
-                          )
-                        })()}
-                      </span>
+                      {editingId === task.id ? (
+                        <div className="cl-edit-row">
+                          <input
+                            ref={editInputRef}
+                            className="cl-edit-input"
+                            value={editText}
+                            onChange={e => setEditText(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') saveEdit(task)
+                              if (e.key === 'Escape') cancelEdit()
+                            }}
+                          />
+                          <input
+                            type="date"
+                            className="cl-edit-date"
+                            value={editDate}
+                            onChange={e => setEditDate(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') saveEdit(task)
+                              if (e.key === 'Escape') cancelEdit()
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <span className="cl-task-title">
+                          {task.title}
+                          {task.due_date && (() => {
+                            const d = new Date(task.due_date)
+                            const key = !isNaN(d)
+                              ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+                              : null
+                            const conflicts = key ? (primaryConflicts[key] || []) : []
+                            return (
+                              <>
+                                <span className="cl-due-badge">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="10" height="10">
+                                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                                    <line x1="16" y1="2" x2="16" y2="6" />
+                                    <line x1="8" y1="2" x2="8" y2="6" />
+                                    <line x1="3" y1="10" x2="21" y2="10" />
+                                  </svg>
+                                  {d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                </span>
+                                <ConflictBadge conflicts={conflicts} />
+                              </>
+                            )
+                          })()}
+                        </span>
+                      )}
                       <select
                         className="cl-assignee-select"
                         value={task.assigned_to_email || ''}
                         onChange={e => assign(task, e.target.value)}
+                        disabled={editingId === task.id}
                       >
                         <option value="">Unassigned</option>
                         {users.map(u => (
@@ -286,9 +358,26 @@ export default function TaskManager() {
                         ))}
                       </select>
                       <button
+                        className="cl-edit-btn"
+                        onClick={() => editingId === task.id ? saveEdit(task) : startEdit(task)}
+                        aria-label={editingId === task.id ? 'Save task' : 'Edit task'}
+                      >
+                        {editingId === task.id ? (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        )}
+                      </button>
+                      <button
                         className="cl-delete-btn"
                         onClick={() => deleteTask(task.id)}
                         aria-label="Delete task"
+                        disabled={editingId === task.id}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="3 6 5 6 21 6" />

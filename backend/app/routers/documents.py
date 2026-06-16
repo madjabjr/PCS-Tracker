@@ -12,7 +12,14 @@ from ..database import get_db
 from ..models import Document, User
 from ..schemas import DocumentResponse
 from ..auth.dependencies import get_current_user
-from ..crypto import encrypt_bytes, decrypt_bytes
+from ..crypto import decrypt_bytes
+from ..storage import (
+    compress_encrypt_write,
+    decrypt_decompress_stream,
+    is_v2_format,
+    should_compress,
+    FileTooLargeError,
+)
 
 router = APIRouter()
 
@@ -21,16 +28,24 @@ MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB
 VALID_CATEGORIES = {"orders", "medical", "housing", "financial", "personnel", "other"}
 
 
-async def _save_file(file: UploadFile, sensitive: bool) -> tuple[str, int]:
-    data = await file.read()
-    original_size = len(data)
-    if original_size > MAX_FILE_BYTES:
-        raise HTTPException(status_code=400, detail="File must be under 25 MB")
-    ext = Path(file.filename).suffix.lower() if file.filename else ""
+async def _save_file(file: UploadFile, _sensitive: bool) -> tuple[str, int]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    ext = Path(file.filename).suffix.lower()
     filename = f"{uuid.uuid4().hex}{ext}"
     DOCUMENTS_DIR.mkdir(exist_ok=True)
-    stored = encrypt_bytes(data) if sensitive else data
-    (DOCUMENTS_DIR / filename).write_bytes(stored)
+
+    compress = should_compress(file.filename, file.content_type)
+    try:
+        original_size = await compress_encrypt_write(
+            file,
+            DOCUMENTS_DIR / filename,
+            compress=compress,
+            max_bytes=MAX_FILE_BYTES,
+        )
+    except FileTooLargeError:
+        raise HTTPException(status_code=400, detail="File must be under 25 MB")
+
     return filename, original_size
 
 
@@ -98,7 +113,17 @@ async def download_document(
     media_type = doc.content_type or "application/octet-stream"
     disposition = f'attachment; filename="{doc.original_filename}"'
 
+    if is_v2_format(path):
+        # New compress+encrypt format — stream decrypt→decompress to client
+        return StreamingResponse(
+            decrypt_decompress_stream(path),
+            media_type=media_type,
+            headers={"Content-Disposition": disposition},
+        )
+
+    # ── Legacy formats (files uploaded before v2 pipeline) ──────────────────
     if doc.is_sensitive:
+        # Legacy: Fernet-only encrypted, no compression
         decrypted = decrypt_bytes(path.read_bytes())
         return StreamingResponse(
             io.BytesIO(decrypted),
@@ -106,6 +131,7 @@ async def download_document(
             headers={"Content-Disposition": disposition},
         )
 
+    # Legacy: plain (unencrypted) file
     return FileResponse(
         path=str(path),
         filename=doc.original_filename,

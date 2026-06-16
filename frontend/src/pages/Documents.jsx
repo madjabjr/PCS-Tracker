@@ -231,7 +231,7 @@ function UploadModal({ onClose, onUploaded }) {
             </div>
             <div className="doc-sensitive-toggle-body">
               <span className="doc-sensitive-toggle-label">Mark as Sensitive</span>
-              <span className="doc-sensitive-toggle-desc">File will be encrypted at rest using AES-128 Fernet encryption.</span>
+              <span className="doc-sensitive-toggle-desc">File will be compressed and encrypted at rest using AES-256-GCM.</span>
             </div>
           </label>
 
